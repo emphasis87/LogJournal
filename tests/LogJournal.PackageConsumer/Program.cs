@@ -1,0 +1,97 @@
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Xml.Linq;
+using LogJournalExample;
+using Microsoft.Extensions.Logging;
+
+if (args.Length != 1)
+{
+    throw new ArgumentException("Pass the path to the generated .nupkg file.");
+}
+
+using (ZipArchive package = ZipFile.OpenRead(args[0]))
+{
+    foreach (string path in new[] { "lib/net8.0/LogJournal.dll", "lib/net8.0/LogJournal.xml", "README.md", "LICENSE" })
+    {
+        if (package.GetEntry(path) is null)
+        {
+            throw new InvalidOperationException($"The package is missing {path}.");
+        }
+    }
+
+    using Stream manifest = package.GetEntry("LogJournal.nuspec")!.Open();
+    XDocument document = XDocument.Load(manifest);
+    XNamespace ns = document.Root!.Name.Namespace;
+    string[] dependencies = document.Descendants(ns + "dependency")
+        .Select(element => (string)element.Attribute("id")!).ToArray();
+    if (!dependencies.SequenceEqual(["Microsoft.Extensions.Logging.Abstractions"]))
+    {
+        throw new InvalidOperationException("Unexpected package dependencies.");
+    }
+
+    using Stream packagedAssembly = package.GetEntry("lib/net8.0/LogJournal.dll")!.Open();
+    using Stream restoredAssembly = File.OpenRead(typeof(LogJournal).Assembly.Location);
+    if (!SHA256.HashData(packagedAssembly).SequenceEqual(SHA256.HashData(restoredAssembly)))
+    {
+        throw new InvalidOperationException("The restored assembly differs from the package. Clear the consumer's obj directory and retry.");
+    }
+}
+
+using (ZipArchive symbols = ZipFile.OpenRead(Path.ChangeExtension(args[0], ".snupkg")))
+{
+    if (symbols.GetEntry("lib/net8.0/LogJournal.pdb") is null)
+    {
+        throw new InvalidOperationException("The symbols package is missing the library PDB.");
+    }
+}
+
+using var destination = new RecordingFactory();
+var journal = new LogJournal();
+using (journal.BeginScope("Startup"))
+{
+    journal.LogInformation("Loaded {Count} settings", 12);
+    journal.LogInformation("Ready");
+}
+journal.ReplayTo(destination.CreateLogger("Standalone"));
+
+using var journals = new LogJournalFactory();
+ILogger first = journals.CreateLogger("First");
+ILogger second = journals.CreateLogger("Second");
+using (first.BeginScope("Shared"))
+{
+    first.LogInformation("One");
+    second.LogInformation("Two");
+}
+journals.ReplayTo(destination);
+journals.ReplayTo(destination);
+
+string[] expected = ["Standalone|Startup|Loaded 12 settings", "Standalone|Startup|Ready",
+    "First|Shared|One", "Second|Shared|Two"];
+if (!destination.Messages.SequenceEqual(expected))
+{
+    throw new InvalidOperationException("Packaged journal replay produced unexpected messages or scopes.");
+}
+Console.WriteLine("NuGet package contents and standalone/factory replay verified.");
+
+internal sealed class RecordingFactory : ILoggerFactory
+{
+    private readonly IExternalScopeProvider _scopes = new LoggerExternalScopeProvider();
+    public List<string> Messages { get; } = [];
+
+    public ILogger CreateLogger(string categoryName) => new RecordingLogger(this, categoryName);
+    public void AddProvider(ILoggerProvider provider) => throw new NotSupportedException();
+    public void Dispose() { }
+
+    private sealed class RecordingLogger(RecordingFactory owner, string category) : ILogger
+    {
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => owner._scopes.Push(state);
+        public bool IsEnabled(LogLevel logLevel) => logLevel != LogLevel.None;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            var scopes = new List<string>();
+            owner._scopes.ForEachScope(static (scope, values) => values.Add(scope?.ToString() ?? ""), scopes);
+            owner.Messages.Add($"{category}|{string.Join("/", scopes)}|{formatter(state, exception)}");
+        }
+    }
+}

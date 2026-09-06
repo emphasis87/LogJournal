@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-pack:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore LogJournal.slnx
+
+      - name: Build
+        run: dotnet build LogJournal.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test LogJournal.slnx --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack src/LogJournal/LogJournal.csproj --configuration Release --no-build --output artifacts
+
+      - name: Run packaged consumer
+        run: dotnet run --project tests/LogJournal.PackageConsumer/LogJournal.PackageConsumer.csproj --configuration Release -- artifacts/LogJournal.1.0.0-alpha1.nupkg
+
+      - name: Run sample
+        run: dotnet run --project samples/LogJournal.Sample/LogJournal.Sample.csproj --configuration Release --no-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          if-no-files-found: error

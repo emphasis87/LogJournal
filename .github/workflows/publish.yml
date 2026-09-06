@@ -1,0 +1,75 @@
+name: Publish NuGet Package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Resolve package version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$') {
+            throw "Release tag must be a version such as v1.0.0-alpha1."
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore LogJournal.slnx
+
+      - name: Build
+        run: dotnet build LogJournal.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test LogJournal.slnx --configuration Release --no-build
+
+      - name: Pack
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: dotnet pack src/LogJournal/LogJournal.csproj --configuration Release --no-restore --output artifacts "-p:Version=$env:PACKAGE_VERSION"
+
+      - name: Run packaged consumer
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: dotnet run --project tests/LogJournal.PackageConsumer/LogJournal.PackageConsumer.csproj --configuration Release "-p:LogJournalPackageVersion=$env:PACKAGE_VERSION" -- "artifacts/LogJournal.$env:PACKAGE_VERSION.nupkg"
+
+      - name: Run sample
+        run: dotnet run --project samples/LogJournal.Sample/LogJournal.Sample.csproj --configuration Release --no-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          if-no-files-found: error
+
+      - name: Push to NuGet
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
+            throw "Configure the NUGET_API_KEY repository secret before publishing."
+          }
+          dotnet nuget push "artifacts/*.nupkg" --api-key "$env:NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
