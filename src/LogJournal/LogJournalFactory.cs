@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Logging;
 
-namespace LogJournalExample;
+namespace LogJournal;
 
 /// <summary>Creates category loggers backed by one shared initialization journal.</summary>
 public sealed class LogJournalFactory : ILoggerFactory
@@ -14,8 +14,8 @@ public sealed class LogJournalFactory : ILoggerFactory
         return _store.CreateLogger(categoryName);
     }
 
-    /// <summary>Drains the current batch in order, preserving each entry's category.</summary>
-    /// <remarks>Neither the destination factory nor its loggers are retained after replay.</remarks>
+    /// <summary>Replays buffered entries and forwards subsequent writes by category.</summary>
+    /// <remarks>This one-time operation retains the destination factory through its resolver.</remarks>
     /// <param name="destination">The configured factory supplying destination loggers.</param>
     public void ReplayTo(ILoggerFactory destination)
     {
@@ -25,7 +25,7 @@ public sealed class LogJournalFactory : ILoggerFactory
             throw new ArgumentException("The log journal factory cannot replay to itself.", nameof(destination));
         }
 
-        // Cache only for this replay; neither the factory nor its loggers are retained.
+        // The resolver and its category logger cache become the live forwarding target.
         var loggers = new Dictionary<string, ILogger>(StringComparer.Ordinal);
         _store.ReplayTo(categoryName =>
         {

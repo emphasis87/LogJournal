@@ -1,8 +1,9 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Xml.Linq;
-using LogJournalExample;
+using LogJournal;
 using Microsoft.Extensions.Logging;
+using StandaloneLogJournal = LogJournal.LogJournal;
 
 if (args.Length != 1)
 {
@@ -30,7 +31,7 @@ using (ZipArchive package = ZipFile.OpenRead(args[0]))
     }
 
     using Stream packagedAssembly = package.GetEntry("lib/net8.0/LogJournal.dll")!.Open();
-    using Stream restoredAssembly = File.OpenRead(typeof(LogJournal).Assembly.Location);
+    using Stream restoredAssembly = File.OpenRead(typeof(StandaloneLogJournal).Assembly.Location);
     if (!SHA256.HashData(packagedAssembly).SequenceEqual(SHA256.HashData(restoredAssembly)))
     {
         throw new InvalidOperationException("The restored assembly differs from the package. Clear the consumer's obj directory and retry.");
@@ -46,13 +47,14 @@ using (ZipArchive symbols = ZipFile.OpenRead(Path.ChangeExtension(args[0], ".snu
 }
 
 using var destination = new RecordingFactory();
-var journal = new LogJournal();
+var journal = new StandaloneLogJournal();
 using (journal.BeginScope("Startup"))
 {
     journal.LogInformation("Loaded {Count} settings", 12);
     journal.LogInformation("Ready");
 }
 journal.ReplayTo(destination.CreateLogger("Standalone"));
+journal.LogInformation("Running");
 
 using var journals = new LogJournalFactory();
 ILogger first = journals.CreateLogger("First");
@@ -63,10 +65,10 @@ using (first.BeginScope("Shared"))
     second.LogInformation("Two");
 }
 journals.ReplayTo(destination);
-journals.ReplayTo(destination);
+second.LogInformation("Three");
 
 string[] expected = ["Standalone|Startup|Loaded 12 settings", "Standalone|Startup|Ready",
-    "First|Shared|One", "Second|Shared|Two"];
+    "Standalone||Running", "First|Shared|One", "Second|Shared|Two", "Second||Three"];
 if (!destination.Messages.SequenceEqual(expected))
 {
     throw new InvalidOperationException("Packaged journal replay produced unexpected messages or scopes.");

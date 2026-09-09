@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Xunit;
 
-namespace LogJournalExample.Tests;
+namespace LogJournal.Tests;
 
 public sealed class LogJournalTests
 {
@@ -163,7 +163,7 @@ public sealed class LogJournalTests
     }
 
     [Fact]
-    public void ReplayScopes_PreserveAmbientScopeAndCloseAtEachBatchBoundary()
+    public void ReplayScopes_ContinueAcrossTheSwitchUntilTheJournalScopeEnds()
     {
         var journal = new LogJournal();
         var destination = new RecordingLogger();
@@ -172,15 +172,14 @@ public sealed class LogJournalTests
         {
             journal.LogInformation("First batch");
             journal.ReplayTo(destination);
-            destination.LogInformation("Between batches");
-            journal.LogInformation("Second batch");
-            journal.ReplayTo(destination);
+            destination.LogInformation("After replay");
+            journal.LogInformation("Forwarded");
         }
 
-        Assert.Equal(["Begin Ambient", "Begin Startup", "Log First batch", "End Startup",
-            "Log Between batches", "Begin Startup", "Log Second batch", "End Startup", "End Ambient"],
+        Assert.Equal(["Begin Ambient", "Begin Startup", "Log First batch", "Log After replay",
+            "Log Forwarded", "End Startup", "End Ambient"],
             destination.Trace);
-        Assert.Equal(["Ambient"], destination.Entries[1].Scopes);
+        Assert.All(destination.Entries, entry => Assert.Equal(["Ambient", "Startup"], entry.Scopes));
     }
 
     [Fact]
@@ -242,7 +241,7 @@ public sealed class LogJournalTests
     }
 
     [Fact]
-    public void FactoryReplay_PreservesGlobalOrderAndCategoriesAndDrainsOnlyOnce()
+    public void FactoryReplay_PreservesBacklogOrderThenForwardsByCategory()
     {
         using var journals = new LogJournalFactory();
         ILogger configuration = journals.CreateLogger("Configuration");
@@ -261,14 +260,10 @@ public sealed class LogJournalTests
         Assert.Equal("settings.json", destination.Entries[0].Log.Properties["FileName"]);
         Assert.Equal(["Configuration", "Database"], destination.CreatedCategories);
 
-        journals.ReplayTo(destination);
-        Assert.Equal(3, destination.Entries.Count);
+        Assert.Throws<InvalidOperationException>(() => journals.ReplayTo(destination));
         database.LogInformation("Next batch");
-        Assert.Equal(3, destination.Entries.Count);
-
-        var nextDestination = new RecordingFactory();
-        journals.ReplayTo(nextDestination);
-        var next = Assert.Single(nextDestination.Entries);
+        Assert.Equal(4, destination.Entries.Count);
+        var next = destination.Entries[^1];
         Assert.Equal("Database", next.Category);
         Assert.Equal("Next batch", next.Log.Message);
     }
@@ -413,7 +408,7 @@ public sealed class LogJournalTests
         journals.Dispose();
 
         Assert.False(destination.Disposed);
-        Assert.Single(destination.Entries);
+        Assert.Equal(["Ready", "Not replayed"], destination.Entries.Select(entry => entry.Log.Message));
         Assert.False(logger.IsEnabled(LogLevel.Information));
         Assert.Throws<ObjectDisposedException>(() => journals.CreateLogger("Another"));
         Assert.Throws<ObjectDisposedException>(() => journals.CreateLogger("Startup"));
@@ -423,26 +418,16 @@ public sealed class LogJournalTests
     }
 
     [Fact]
-    public void FactoryReplay_DoesNotRetainDestinationFactoryOrLoggers()
+    public void FactoryReplay_RetainsDestinationResolverUntilDispose()
     {
         using var journals = new LogJournalFactory();
         journals.CreateLogger("Startup").LogInformation("Startup");
-        WeakReference[] references = ReplayToTemporaryFactory(journals);
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        Assert.All(references, reference => Assert.False(reference.IsAlive));
-        GC.KeepAlive(journals);
-    }
-
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static WeakReference[] ReplayToTemporaryFactory(LogJournalFactory journals)
-    {
         var destination = new RecordingFactory();
         journals.ReplayTo(destination);
-        return [new WeakReference(destination), new WeakReference(Assert.Single(destination.CreatedLoggers))];
+        journals.CreateLogger("Startup").LogInformation("Forwarded");
+
+        Assert.Equal(["Startup", "Forwarded"], destination.Entries.Select(entry => entry.Log.Message));
+        Assert.Throws<InvalidOperationException>(() => journals.ReplayTo(new RecordingFactory()));
     }
 
     [Fact]
@@ -471,8 +456,7 @@ public sealed class LogJournalTests
 
         journal.ReplayTo(destination);
         probe.LogInformation("Loaded {FileName} with {SettingCount:D3} settings", "live.json", 34);
-        Assert.Equal(2, destination.Entries.Count);
-        journal.ReplayTo(destination);
+        Assert.Equal(3, destination.Entries.Count);
 
         Assert.Equal(
             ["Loaded first.json with 012 settings", "Could not load missing.json",
@@ -517,8 +501,7 @@ public sealed class LogJournalTests
         journal.ReplayTo(destination);
         GeneratedMessages.Loaded(probe, "live.json", 56);
         Assert.Same(firstState, probe.LastState);
-        Assert.Equal(3, destination.Entries.Count);
-        journal.ReplayTo(destination);
+        Assert.Equal(4, destination.Entries.Count);
 
         Assert.Equal(
             ["Loaded first.json with 12 settings", "Loaded second.json with 34 settings",
@@ -600,8 +583,7 @@ public sealed class LogJournalTests
         var destination = new RecordingLogger();
         journal.ReplayTo(destination);
         journal.LogInformation("Outside scope");
-        Assert.Equal(2, destination.Entries.Count);
-        journal.ReplayTo(destination);
+        Assert.Equal(3, destination.Entries.Count);
 
         Assert.Equal("Startup", destination.Entries[0].Scopes[0]);
         Assert.Equal("Configuration", destination.Entries[0].ScopeProperties[1]["Component"]);
@@ -641,7 +623,7 @@ public sealed class LogJournalTests
     }
 
     [Fact]
-    public void IsEnabled_AfterReplay_StillAcceptsAllMessageLevels()
+    public void IsEnabled_AfterReplay_UsesDestinationFilter()
     {
         var journal = new LogJournal();
         var destination = new RecordingLogger(LogLevel.Warning);
@@ -650,13 +632,13 @@ public sealed class LogJournalTests
 
         journal.ReplayTo(destination);
 
-        Assert.True(journal.IsEnabled(LogLevel.Debug));
+        Assert.False(journal.IsEnabled(LogLevel.Debug));
         Assert.True(journal.IsEnabled(LogLevel.Warning));
         Assert.False(journal.IsEnabled(LogLevel.None));
     }
 
     [Fact]
-    public void ReplayTo_DrainsEachBatchWithoutForwardingOrDuplicatingMessages()
+    public void ReplayTo_DrainsBacklogThenForwardsAndCanOnlyBeCalledOnce()
     {
         var journal = new LogJournal();
         journal.LogInformation("Initialization started");
@@ -674,41 +656,22 @@ public sealed class LogJournalTests
         journal.LogInformation("Initialization completed");
 
         Assert.Equal(
-            ["Initialization started", "Configuration fallback used"],
+            ["Initialization started", "Configuration fallback used", "Initialization completed"],
             destination.Entries.Select(entry => entry.Message));
 
-        var nextDestination = new RecordingLogger();
-        journal.ReplayTo(nextDestination);
-        Assert.Equal("Initialization completed", Assert.Single(nextDestination.Entries).Message);
-
-        journal.ReplayTo(destination);
-        journal.ReplayTo(nextDestination);
-        Assert.Equal(2, destination.Entries.Count);
-        Assert.Single(nextDestination.Entries);
+        Assert.Throws<InvalidOperationException>(() => journal.ReplayTo(new RecordingLogger()));
     }
 
     [Fact]
-    public void ReplayTo_DoesNotRetainDestination()
+    public void ReplayTo_RetainsDestinationForImmediateForwarding()
     {
         var journal = new LogJournal();
         journal.LogInformation("Startup");
-        WeakReference destination = ReplayToTemporaryLogger(journal);
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        Assert.False(destination.IsAlive);
-        GC.KeepAlive(journal);
-    }
-
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static WeakReference ReplayToTemporaryLogger(LogJournal journal)
-    {
         var destination = new RecordingLogger();
         journal.ReplayTo(destination);
-        Assert.Single(destination.Entries);
-        return new WeakReference(destination);
+        journal.LogInformation("Forwarded");
+
+        Assert.Equal(["Startup", "Forwarded"], destination.Entries.Select(entry => entry.Message));
     }
 
     [Fact]

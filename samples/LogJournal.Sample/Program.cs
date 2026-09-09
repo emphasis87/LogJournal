@@ -1,7 +1,8 @@
-using LogJournalExample;
+using LogJournal;
 using Microsoft.Extensions.Logging;
+using StandaloneLogJournal = LogJournal.LogJournal;
 
-var startupLogger = new LogJournal();
+var startupLogger = new StandaloneLogJournal();
 
 startupLogger.LogInformation("Application initialization started");
 
@@ -44,8 +45,8 @@ ILogger finalStartupLogger = finalLoggerFactory.CreateLogger("Startup");
 startupLogger.ReplayTo(finalStartupLogger);
 journalFactory.ReplayTo(finalLoggerFactory);
 
-// Replay does not redirect the journal. Use the final logger for new messages.
-finalStartupLogger.LogInformation("Application initialization completed");
+// Existing journal loggers now forward directly through the final logging pipeline.
+startupLogger.LogInformation("Application initialization completed");
 
 ILogger applicationLogger = finalLoggerFactory.CreateLogger("Application");
 applicationLogger.LogInformation("Application is running");
