@@ -47,6 +47,17 @@ using (ZipArchive symbols = ZipFile.OpenRead(Path.ChangeExtension(args[0], ".snu
 }
 
 using var destination = new RecordingFactory();
+using var fallbackOutput = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+var fallbackLogger = new TextWriterLogger(fallbackOutput, categoryName: "Fallback");
+using (fallbackLogger.BeginScope("Startup"))
+{
+    fallbackLogger.LogError(new EventId(7, "Failed"), "Logging initialization failed");
+}
+if (!fallbackOutput.ToString().Contains("[Error] Fallback[7:Failed] => Startup Logging initialization failed"))
+{
+    throw new InvalidOperationException("The packaged TextWriterLogger produced unexpected default output.");
+}
+
 var journal = new StandaloneLogJournal();
 if (journal.HasErrors || journal.HasBacklog)
 {

@@ -52,6 +52,50 @@ logger.LogInformation("Forwarded directly to the final logger");
 The caller manages the lifetime of the destination logger and its `ILoggerFactory`.
 They must remain alive while the journal loggers can still be used.
 
+## Text writer fallback
+
+`TextWriterLogger` is a synchronous `ILogger` implementation suitable for a
+last-resort file or console destination. It does not own or dispose the supplied
+`TextWriter`. By default, it flushes after every entry so fallback diagnostics
+are less likely to remain buffered during a startup failure.
+
+```csharp
+using var writer = new StreamWriter(fallbackFilePath);
+var fallbackLogger = new TextWriterLogger(writer, categoryName: "Startup");
+
+journal.ReplayTo(fallbackLogger);
+```
+
+The default formatter writes an ISO 8601 UTC timestamp, level, optional category,
+non-default `EventId`, scope chain, rendered message, and full exception text:
+
+```text
+2026-09-15T12:34:56.7890000+00:00 [Error] Startup[42:Failed] => Configuration Could not load settings.json
+System.InvalidOperationException: Configuration failed
+```
+
+A custom formatter receives a stable `TextWriterLogEntry` snapshot:
+
+```csharp
+var fallbackLogger = new TextWriterLogger(
+    writer,
+    entry => $"{entry.TimestampUtc:O}|{entry.Level}|{entry.CategoryName}|{entry.Message}",
+    categoryName: "Startup",
+    flushAfterWrite: true);
+```
+
+`TextWriterLogEntry` contains timestamp, category, level, `EventId`, message,
+exception, structured properties, and ordered `TextWriterLogScope` snapshots.
+Property copies are shallow. The original MEL formatter and transient state are
+consumed synchronously, so ordinary `FormattedLogValues` and reusable
+`LoggerMessageState` instances are safe. Calls are serialized per logger; the
+custom formatter and writer run while that logger's write lock is held.
+
+The logger accepts all levels except `LogLevel.None`. The caller must ensure the
+writer remains alive while the logger is used. Writer and formatter exceptions
+are propagated to the caller. For fallback files, use an application-owned
+directory, an unpredictable filename, and atomic `FileMode.CreateNew` creation.
+
 ## Inspecting the backlog
 
 Both `LogJournal` and `LogJournalFactory` expose two thread-safe status properties:
@@ -291,3 +335,5 @@ the factory, post-switch forwarding, and disposal behavior.
 Scope lifetime tests check the exact sequence of opening, writing, and closing
 for nested scopes, identical values with different identities, interleaved
 asynchronous contexts, multiple categories, batch boundaries, and replay failures.
+`TextWriterLogger` tests cover the default and custom formatters, structured
+state and scopes, generated thread-local state, and concurrent writes.
