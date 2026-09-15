@@ -16,6 +16,9 @@ public sealed class LogJournal : ILogger
     /// <summary>Gets whether the buffered backlog contains an Error or Critical entry.</summary>
     public bool HasErrors => _store.HasErrors;
 
+    /// <summary>Gets whether the journal currently contains any buffered entries.</summary>
+    public bool HasBacklog => _store.HasBacklog;
+
     /// <inheritdoc />
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
         Exception? exception, Func<TState, Exception?, string> formatter) =>

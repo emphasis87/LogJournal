@@ -48,15 +48,31 @@ using (ZipArchive symbols = ZipFile.OpenRead(Path.ChangeExtension(args[0], ".snu
 
 using var destination = new RecordingFactory();
 var journal = new StandaloneLogJournal();
+if (journal.HasErrors || journal.HasBacklog)
+{
+    throw new InvalidOperationException("A new journal unexpectedly reports buffered errors.");
+}
 using (journal.BeginScope("Startup"))
 {
     journal.LogInformation("Loaded {Count} settings", 12);
     journal.LogInformation("Ready");
 }
+if (!journal.HasBacklog || journal.HasErrors)
+{
+    throw new InvalidOperationException("The journal did not report its informational backlog correctly.");
+}
 journal.ReplayTo(destination.CreateLogger("Standalone"));
+if (journal.HasErrors || journal.HasBacklog)
+{
+    throw new InvalidOperationException("A replayed journal unexpectedly reports buffered errors.");
+}
 journal.LogInformation("Running");
 
 using var journals = new LogJournalFactory();
+if (journals.HasErrors || journals.HasBacklog)
+{
+    throw new InvalidOperationException("A new journal factory unexpectedly reports buffered errors.");
+}
 ILogger first = journals.CreateLogger("First");
 ILogger second = journals.CreateLogger("Second");
 using (first.BeginScope("Shared"))

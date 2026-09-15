@@ -9,6 +9,61 @@ public sealed class LogJournalTests
     private static List<KeyValuePair<string, object?>>? _reusableState;
 
     [Fact]
+    public void HasErrors_TracksOnlyBufferedErrorAndCriticalEntries()
+    {
+        var journal = new LogJournal();
+        Assert.False(journal.HasErrors);
+        Assert.False(journal.HasBacklog);
+
+        journal.LogWarning("Warning");
+        Assert.False(journal.HasErrors);
+        Assert.True(journal.HasBacklog);
+        journal.LogError("Error");
+        journal.LogCritical("Critical");
+        Assert.True(journal.HasErrors);
+
+        var destination = new RecordingLogger();
+        journal.ReplayTo(destination);
+        Assert.False(journal.HasErrors);
+        Assert.False(journal.HasBacklog);
+
+        journal.LogError("Forwarded error");
+        Assert.False(journal.HasErrors);
+        Assert.False(journal.HasBacklog);
+        Assert.Equal("Forwarded error", destination.Entries[^1].Message);
+    }
+
+    [Fact]
+    public void FactoryHasErrors_AggregatesCategoriesAndRetainsFailedEntryForRetry()
+    {
+        using var journals = new LogJournalFactory();
+        ILogger first = journals.CreateLogger("First");
+        ILogger second = journals.CreateLogger("Second");
+        first.LogInformation("Information");
+        second.LogError("Failure");
+        Assert.True(journals.HasErrors);
+        Assert.True(journals.HasBacklog);
+
+        var failing = new RecordingFactory(onWrite: entry =>
+        {
+            if (entry.Log.Level == LogLevel.Error)
+            {
+                throw new InvalidOperationException("Destination failed");
+            }
+        });
+        Assert.Throws<InvalidOperationException>(() => journals.ReplayTo(failing));
+        Assert.True(journals.HasErrors);
+        Assert.True(journals.HasBacklog);
+
+        journals.ReplayTo(new RecordingFactory());
+        Assert.False(journals.HasErrors);
+        Assert.False(journals.HasBacklog);
+        second.LogCritical("Forwarded critical");
+        Assert.False(journals.HasErrors);
+        Assert.False(journals.HasBacklog);
+    }
+
+    [Fact]
     public void BeginScope_CapturesTextAndPropertiesOnlyOnce()
     {
         var journal = new LogJournal();
@@ -738,7 +793,8 @@ public sealed class LogJournalTests
         }
     }
 
-    private sealed class RecordingFactory : ILoggerFactory
+    private sealed class RecordingFactory(Action<(string Category, RecordedLog Log)>? onWrite = null)
+        : ILoggerFactory
     {
         private readonly IExternalScopeProvider _scopeProvider = new LoggerExternalScopeProvider();
 
@@ -751,7 +807,12 @@ public sealed class LogJournalTests
         public ILogger CreateLogger(string categoryName)
         {
             CreatedCategories.Add(categoryName);
-            var logger = new RecordingLogger(onWrite: entry => Entries.Add((categoryName, entry)),
+            var logger = new RecordingLogger(onWrite: entry =>
+            {
+                var categorized = (categoryName, entry);
+                Entries.Add(categorized);
+                onWrite?.Invoke(categorized);
+            },
                 scopeProvider: _scopeProvider, trace: Trace);
             CreatedLoggers.Add(logger);
             return logger;

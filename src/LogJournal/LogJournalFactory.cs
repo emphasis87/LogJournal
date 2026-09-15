@@ -10,6 +10,9 @@ public sealed class LogJournalFactory : ILoggerFactory
     /// <summary>Gets whether the shared buffered backlog contains an Error or Critical entry.</summary>
     public bool HasErrors => _store.HasErrors;
 
+    /// <summary>Gets whether the shared journal currently contains any buffered entries.</summary>
+    public bool HasBacklog => _store.HasBacklog;
+
     /// <summary>Returns the cached logger for the exact category name.</summary>
     public ILogger CreateLogger(string categoryName)
     {

@@ -52,6 +52,29 @@ logger.LogInformation("Forwarded directly to the final logger");
 The caller manages the lifetime of the destination logger and its `ILoggerFactory`.
 They must remain alive while the journal loggers can still be used.
 
+## Inspecting the backlog
+
+Both `LogJournal` and `LogJournalFactory` expose two thread-safe status properties:
+
+```csharp
+if (journals.HasBacklog)
+{
+    Console.WriteLine("Initialization produced log entries.");
+}
+
+if (journals.HasErrors)
+{
+    Console.WriteLine("Initialization produced an Error or Critical entry.");
+}
+```
+
+`HasBacklog` is true when at least one entry is currently buffered. `HasErrors`
+is true when the buffered entries contain at least one `LogLevel.Error` or
+`LogLevel.Critical` entry. These properties describe only the backlog, not log
+history. After a successful replay and switch, both are false; immediately
+forwarded entries are not retained and therefore do not change them. A failed
+replay leaves its current and remaining entries reflected in both properties.
+
 ## Repository layout
 
 ```text
@@ -258,7 +281,8 @@ are captured only once at `BeginScope`, and that later mutations do not affect
 the snapshot. Additional tests verify formatting of unstructured message state
 at write time.
 Replay tests verify ordered backlog delivery, immediate forwarding, destination
-filtering, one-time switching, retained destinations, and retry after failures.
+filtering, one-time switching, retained destinations, backlog/error status, and
+retry after failures.
 
 Factory tests verify shared ordering and categories, isolation between standalone
 journals and different factories, scopes across `await`, and concurrent writes

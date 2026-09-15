@@ -63,6 +63,17 @@ internal sealed class LogJournalStore : IDisposable
         }
     }
 
+    public bool HasBacklog
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _entries.Count != 0;
+            }
+        }
+    }
+
     public void Log<TState>(
         string categoryName,
         LogLevel logLevel,
