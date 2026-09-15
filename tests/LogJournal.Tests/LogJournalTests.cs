@@ -9,6 +9,88 @@ public sealed class LogJournalTests
     private static List<KeyValuePair<string, object?>>? _reusableState;
 
     [Fact]
+    public void TextWriterLogger_DefaultFormatterIncludesMetadataScopesAndException()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        var logger = new TextWriterLogger(writer, categoryName: "Startup");
+        var exception = new InvalidOperationException("Configuration failed");
+
+        using (logger.BeginScope("Phase: {Phase}", "Services"))
+        {
+            logger.LogError(new EventId(42, "Failed"), exception,
+                "Could not load {FileName}", "settings.json");
+        }
+
+        string output = writer.ToString();
+        int timestampEnd = output.IndexOf(' ');
+        Assert.True(DateTimeOffset.TryParseExact(output[..timestampEnd], "O",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out _));
+        Assert.Contains(" [Error] Startup[42:Failed] => Phase: Services Could not load settings.json", output);
+        Assert.Contains("System.InvalidOperationException: Configuration failed", output);
+    }
+
+    [Fact]
+    public void TextWriterLogger_CustomFormatterReceivesStableStructuredEntry()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        TextWriterLogEntry? captured = null;
+        var logger = new TextWriterLogger(writer, entry =>
+        {
+            captured = entry;
+            return $"{entry.Level}|{entry.CategoryName}|{entry.Message}";
+        }, categoryName: "Configuration");
+        var scope = new Dictionary<string, object?> { ["OperationId"] = 123 };
+
+        using (logger.BeginScope(scope))
+        {
+            logger.LogInformation("Loaded {Count} settings", 12);
+        }
+        scope.Clear();
+
+        Assert.Equal($"Information|Configuration|Loaded 12 settings{Environment.NewLine}", writer.ToString());
+        Assert.NotNull(captured);
+        Assert.Equal(12, captured.Properties.Single(item => item.Key == "Count").Value);
+        Assert.Equal("Loaded {Count} settings",
+            captured.Properties.Single(item => item.Key == "{OriginalFormat}").Value);
+        Assert.Equal(123, captured.Scopes[0].Properties.Single(item => item.Key == "OperationId").Value);
+    }
+
+    [Fact]
+    public void TextWriterLogger_CapturesGeneratedThreadLocalStateBeforeItIsCleared()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        var entries = new List<TextWriterLogEntry>();
+        var logger = new TextWriterLogger(writer, entry =>
+        {
+            entries.Add(entry);
+            return entry.Message;
+        });
+
+        GeneratedMessages.Loaded(logger, "first.json", 12);
+        GeneratedMessages.Loaded(logger, "second.json", 34);
+
+        Assert.Equal(["Loaded first.json with 12 settings", "Loaded second.json with 34 settings"],
+            entries.Select(entry => entry.Message));
+        Assert.Equal("first.json", entries[0].Properties.Single(item => item.Key == "FileName").Value);
+        Assert.Equal("second.json", entries[1].Properties.Single(item => item.Key == "FileName").Value);
+    }
+
+    [Fact]
+    public async Task TextWriterLogger_SerializesConcurrentWrites()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        var logger = new TextWriterLogger(writer, entry => entry.Message, flushAfterWrite: false);
+
+        await Task.WhenAll(Enumerable.Range(0, 100)
+            .Select(index => Task.Run(() => logger.LogInformation("Entry {Index}", index))));
+
+        string[] lines = writer.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(100, lines.Length);
+        Assert.Equal(100, lines.Distinct().Count());
+    }
+
+    [Fact]
     public void HasErrors_TracksOnlyBufferedErrorAndCriticalEntries()
     {
         var journal = new LogJournal();
