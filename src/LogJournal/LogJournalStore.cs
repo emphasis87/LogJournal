@@ -11,6 +11,7 @@ internal sealed class LogJournalStore : IDisposable
     private readonly List<(ScopeNode Scope, IDisposable? Handle)> _activeScopes = [];
     private readonly Stack<ScopeNode> _pendingScopes = new();
     private Func<string, ILogger>? _resolveLogger;
+    private int _errorCount;
     private bool _disposed;
     private bool _replaying;
 
@@ -51,6 +52,17 @@ internal sealed class LogJournalStore : IDisposable
         }
     }
 
+    public bool HasErrors
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _errorCount != 0;
+            }
+        }
+    }
+
     public void Log<TState>(
         string categoryName,
         LogLevel logLevel,
@@ -74,6 +86,10 @@ internal sealed class LogJournalStore : IDisposable
             if (_resolveLogger is null)
             {
                 _entries.Enqueue(entry);
+                if (IsErrorOrHigher(logLevel))
+                {
+                    _errorCount++;
+                }
                 return;
             }
 
@@ -106,6 +122,10 @@ internal sealed class LogJournalStore : IDisposable
                     TransitionScopes(logger, entry.Scope);
                     entry.LogTo(logger);
                     _entries.Dequeue();
+                    if (IsErrorOrHigher(entry.Level))
+                    {
+                        _errorCount--;
+                    }
                 }
 
                 CloseScopesOutside(_currentScope.Value);
@@ -140,11 +160,15 @@ internal sealed class LogJournalStore : IDisposable
                 _disposed = true;
                 _resolveLogger = null;
                 _entries.Clear();
+                _errorCount = 0;
                 _loggers.Clear();
                 _currentScope.Value = null;
             }
         }
     }
+
+    private static bool IsErrorOrHigher(LogLevel logLevel) =>
+        logLevel >= LogLevel.Error && logLevel != LogLevel.None;
 
     private void TransitionScopes(ILogger logger, ScopeNode? next)
     {
