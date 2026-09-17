@@ -25,7 +25,7 @@ public sealed class LogJournal : ILogger
         _store.Log(string.Empty, logLevel, eventId, state, exception, formatter);
 
     /// <summary>Replays buffered entries and forwards subsequent writes to the destination.</summary>
-    /// <remarks>This one-time operation retains the destination logger.</remarks>
+    /// <remarks>Later calls replace the retained destination logger.</remarks>
     /// <param name="destination">The configured logger that receives the buffered entries.</param>
     public void ReplayTo(ILogger destination)
     {

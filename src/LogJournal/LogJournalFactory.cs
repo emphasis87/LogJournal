@@ -21,7 +21,7 @@ public sealed class LogJournalFactory : ILoggerFactory
     }
 
     /// <summary>Replays buffered entries and forwards subsequent writes by category.</summary>
-    /// <remarks>This one-time operation retains the destination factory through its resolver.</remarks>
+    /// <remarks>Later calls replace the retained destination factory and category logger cache.</remarks>
     /// <param name="destination">The configured factory supplying destination loggers.</param>
     public void ReplayTo(ILoggerFactory destination)
     {
@@ -31,7 +31,7 @@ public sealed class LogJournalFactory : ILoggerFactory
             throw new ArgumentException("The log journal factory cannot replay to itself.", nameof(destination));
         }
 
-        // The resolver and its category logger cache become the live forwarding target.
+        // This resolver and its category logger cache replace the previous forwarding target.
         var loggers = new Dictionary<string, ILogger>(StringComparer.Ordinal);
         _store.ReplayTo(categoryName =>
         {

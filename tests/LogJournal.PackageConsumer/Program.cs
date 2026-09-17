@@ -100,7 +100,18 @@ if (!destination.Messages.SequenceEqual(expected))
 {
     throw new InvalidOperationException("Packaged journal replay produced unexpected messages or scopes.");
 }
-Console.WriteLine("NuGet package contents and standalone/factory replay verified.");
+
+using var factoryOutput = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+using var fallbackFactory = new TextWriterLoggerFactory(factoryOutput, entry =>
+    $"{entry.CategoryName}|{entry.Message}");
+journals.ReplayTo(fallbackFactory);
+first.LogInformation("Four");
+if (factoryOutput.ToString() != $"First|Four{Environment.NewLine}")
+{
+    throw new InvalidOperationException("The packaged TextWriterLoggerFactory produced unexpected output.");
+}
+
+Console.WriteLine("NuGet package contents, writer logging, replay, and destination replacement verified.");
 
 internal sealed class RecordingFactory : ILoggerFactory
 {

@@ -91,6 +91,80 @@ public sealed class LogJournalTests
     }
 
     [Fact]
+    public void TextWriterLoggerFactory_CachesCategoriesAndSharesScopes()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        using var factory = new TextWriterLoggerFactory(writer, entry =>
+            $"{entry.CategoryName}|{string.Join('/', entry.Scopes.Select(scope => scope.Message))}|{entry.Message}");
+        ILogger first = factory.CreateLogger("First");
+        ILogger second = factory.CreateLogger("Second");
+        Assert.Same(first, factory.CreateLogger("First"));
+        Assert.NotSame(first, second);
+
+        using (first.BeginScope("Shared"))
+        {
+            first.LogInformation("One");
+            second.LogInformation("Two");
+        }
+
+        Assert.Equal(["First|Shared|One", "Second|Shared|Two"],
+            writer.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
+    public async Task TextWriterLoggerFactory_SerializesConcurrentCategoryWrites()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        using var factory = new TextWriterLoggerFactory(writer, entry =>
+            $"{entry.CategoryName}:{entry.Message}", flushAfterWrite: false);
+
+        await Task.WhenAll(Enumerable.Range(0, 100).Select(index => Task.Run(() =>
+            factory.CreateLogger($"Category{index % 4}").LogInformation("Entry {Index}", index))));
+
+        string[] lines = writer.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(100, lines.Length);
+        Assert.Equal(100, lines.Distinct().Count());
+    }
+
+    [Fact]
+    public void TextWriterLoggerFactory_DisposeStopsLoggersButLeavesWriterOpen()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        var factory = new TextWriterLoggerFactory(writer);
+        ILogger logger = factory.CreateLogger("Startup");
+        logger.LogInformation("Before dispose");
+
+        factory.Dispose();
+        factory.Dispose();
+        writer.Write("Writer remains open");
+
+        Assert.False(logger.IsEnabled(LogLevel.Information));
+        Assert.Throws<ObjectDisposedException>(() => logger.LogInformation("After dispose"));
+        Assert.Throws<ObjectDisposedException>(() => logger.BeginScope("After dispose"));
+        Assert.Throws<ObjectDisposedException>(() => factory.CreateLogger("Other"));
+        Assert.Throws<NotSupportedException>(() => factory.AddProvider(null!));
+        Assert.Contains("Writer remains open", writer.ToString());
+    }
+
+    [Fact]
+    public void JournalFactory_ReplaysAndForwardsToTextWriterLoggerFactory()
+    {
+        using var writer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        using var destination = new TextWriterLoggerFactory(writer, entry =>
+            $"{entry.CategoryName}|{entry.Message}");
+        using var journals = new LogJournalFactory();
+        ILogger first = journals.CreateLogger("First");
+        ILogger second = journals.CreateLogger("Second");
+        first.LogInformation("Buffered");
+
+        journals.ReplayTo(destination);
+        second.LogInformation("Forwarded");
+
+        Assert.Equal(["First|Buffered", "Second|Forwarded"],
+            writer.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
     public void HasErrors_TracksOnlyBufferedErrorAndCriticalEntries()
     {
         var journal = new LogJournal();
@@ -320,6 +394,26 @@ public sealed class LogJournalTests
     }
 
     [Fact]
+    public void ReplayTo_ReplacesDestinationAndMovesActiveScopesOnNextWrite()
+    {
+        var journal = new LogJournal();
+        var first = new RecordingLogger();
+        var second = new RecordingLogger();
+
+        using (journal.BeginScope("Startup"))
+        {
+            journal.LogInformation("Buffered");
+            journal.ReplayTo(first);
+            journal.LogInformation("First destination");
+            journal.ReplayTo(second);
+            journal.LogInformation("Second destination");
+        }
+
+        Assert.Equal(["Begin Startup", "Log Buffered", "Log First destination", "End Startup"], first.Trace);
+        Assert.Equal(["Begin Startup", "Log Second destination", "End Startup"], second.Trace);
+    }
+
+    [Fact]
     public void ReplayScopes_CloseOnFailureAndRestoreScopesForRetry()
     {
         var journal = new LogJournal();
@@ -397,10 +491,11 @@ public sealed class LogJournalTests
         Assert.Equal("settings.json", destination.Entries[0].Log.Properties["FileName"]);
         Assert.Equal(["Configuration", "Database"], destination.CreatedCategories);
 
-        Assert.Throws<InvalidOperationException>(() => journals.ReplayTo(destination));
+        var replacement = new RecordingFactory();
+        journals.ReplayTo(replacement);
         database.LogInformation("Next batch");
-        Assert.Equal(4, destination.Entries.Count);
-        var next = destination.Entries[^1];
+        Assert.Equal(3, destination.Entries.Count);
+        var next = Assert.Single(replacement.Entries);
         Assert.Equal("Database", next.Category);
         Assert.Equal("Next batch", next.Log.Message);
     }
@@ -555,7 +650,7 @@ public sealed class LogJournalTests
     }
 
     [Fact]
-    public void FactoryReplay_RetainsDestinationResolverUntilDispose()
+    public void FactoryReplay_ReplacesRetainedDestinationResolver()
     {
         using var journals = new LogJournalFactory();
         journals.CreateLogger("Startup").LogInformation("Startup");
@@ -564,7 +659,11 @@ public sealed class LogJournalTests
         journals.CreateLogger("Startup").LogInformation("Forwarded");
 
         Assert.Equal(["Startup", "Forwarded"], destination.Entries.Select(entry => entry.Log.Message));
-        Assert.Throws<InvalidOperationException>(() => journals.ReplayTo(new RecordingFactory()));
+        var replacement = new RecordingFactory();
+        journals.ReplayTo(replacement);
+        journals.CreateLogger("Startup").LogInformation("Replacement");
+        Assert.Equal("Replacement", Assert.Single(replacement.Entries).Log.Message);
+        Assert.Equal(2, destination.Entries.Count);
     }
 
     [Fact]
@@ -775,7 +874,7 @@ public sealed class LogJournalTests
     }
 
     [Fact]
-    public void ReplayTo_DrainsBacklogThenForwardsAndCanOnlyBeCalledOnce()
+    public void ReplayTo_DrainsBacklogThenForwardsAndCanReplaceDestination()
     {
         var journal = new LogJournal();
         journal.LogInformation("Initialization started");
@@ -796,7 +895,11 @@ public sealed class LogJournalTests
             ["Initialization started", "Configuration fallback used", "Initialization completed"],
             destination.Entries.Select(entry => entry.Message));
 
-        Assert.Throws<InvalidOperationException>(() => journal.ReplayTo(new RecordingLogger()));
+        var replacement = new RecordingLogger();
+        journal.ReplayTo(replacement);
+        journal.LogInformation("Replacement destination");
+        Assert.Equal("Replacement destination", Assert.Single(replacement.Entries).Message);
+        Assert.Equal(3, destination.Entries.Count);
     }
 
     [Fact]

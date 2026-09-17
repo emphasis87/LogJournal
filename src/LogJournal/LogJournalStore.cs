@@ -119,14 +119,16 @@ internal sealed class LogJournalStore : IDisposable
             {
                 throw new InvalidOperationException("Recursive replay is not supported.");
             }
-            if (_resolveLogger is not null)
-            {
-                throw new InvalidOperationException("The log journal has already been replayed.");
-            }
-
             _replaying = true;
             try
             {
+                if (_resolveLogger is not null)
+                {
+                    CloseScopes(0);
+                    _resolveLogger = resolveLogger;
+                    return;
+                }
+
                 while (_entries.TryPeek(out Entry? entry))
                 {
                     ILogger logger = resolveLogger(entry.CategoryName);

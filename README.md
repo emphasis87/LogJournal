@@ -8,8 +8,8 @@ A replayable log journal for Microsoft.Extensions.Logging.
 (MEL) `ILogger` interface and captures messages during application initialization.
 Once final logging is configured, `ReplayTo` replays the buffered entries in order
 to the supplied destination and switches the journal to immediate forwarding.
-This is a one-time operation: the destination resolver is retained and subsequent
-writes use it directly.
+The destination resolver is retained and subsequent writes use it directly.
+Calling `ReplayTo` again replaces the retained logger or logger factory.
 
 A standalone `new LogJournal()` always owns its storage. The optional
 `LogJournalFactory : ILoggerFactory` creates loggers that share storage within
@@ -95,6 +95,23 @@ The logger accepts all levels except `LogLevel.None`. The caller must ensure the
 writer remains alive while the logger is used. Writer and formatter exceptions
 are propagated to the caller. For fallback files, use an application-owned
 directory, an unpredictable filename, and atomic `FileMode.CreateNew` creation.
+
+For multiple categories, use `TextWriterLoggerFactory` with the same formatter
+contract and writer ownership rules:
+
+```csharp
+using var fallbackFactory = new TextWriterLoggerFactory(
+    writer,
+    entry => $"{entry.TimestampUtc:O}|{entry.Level}|{entry.CategoryName}|{entry.Message}");
+
+journals.ReplayTo(fallbackFactory);
+```
+
+The factory caches one logger per exact category and shares one writer lock and
+one MEL scope provider across all category loggers. This preserves serialized
+output and shared scopes when a `LogJournalFactory` replays entries from multiple
+categories. `Dispose()` stops existing loggers and clears the category cache, but
+does not dispose the caller-owned writer. `AddProvider` is not supported.
 
 ## Inspecting the backlog
 
@@ -214,9 +231,10 @@ using `StringComparer.Ordinal`. Each factory has its own cache, cleared on
 
 Each entry in shared storage contains its category. `ReplayTo(ILoggerFactory)`
 replays messages in the order they entered storage, rather than grouping them
-by category. A shared lock determines the order of concurrent writes. During the
-one-time switch, destination loggers are resolved by category and cached by the
-retained resolver for subsequent forwarding.
+by category. A shared lock determines the order of concurrent writes. During a
+switch, destination loggers are resolved by category and cached by the retained
+resolver for subsequent forwarding. A later `ReplayTo` replaces that resolver
+and releases its category logger cache.
 
 Scopes are shared between loggers from the same factory in the current
 asynchronous context and flow across `await`. Different factories and standalone
@@ -237,9 +255,11 @@ After configuration, the application explicitly calls
 `ReplayTo(finalFactory.CreateLogger("Startup"))`. This synchronously delivers
 the backlog, then stores the resolver. Each later `Log<TState>` snapshots its entry,
 resolves the appropriate destination logger, transitions scopes, and calls the
-entry's `LogTo` method immediately. A second `ReplayTo` call throws
-`InvalidOperationException`. After the switch, `IsEnabled` delegates to the
-resolved destination logger for the corresponding category.
+entry's `LogTo` method immediately. A later `ReplayTo` closes scopes opened on
+the previous destination, replaces its resolver, and routes following entries
+to the replacement. Active journal scopes reopen on the replacement when the
+next entry is written. After the switch, `IsEnabled` delegates to the resolved
+destination logger for the corresponding category.
 
 The destination provider may process delivered messages asynchronously. The
 resolver remains retained until the journal becomes unreachable, or until
@@ -325,8 +345,8 @@ are captured only once at `BeginScope`, and that later mutations do not affect
 the snapshot. Additional tests verify formatting of unstructured message state
 at write time.
 Replay tests verify ordered backlog delivery, immediate forwarding, destination
-filtering, one-time switching, retained destinations, backlog/error status, and
-retry after failures.
+filtering, retained and replaceable destinations, backlog/error status, and retry
+after failures.
 
 Factory tests verify shared ordering and categories, isolation between standalone
 journals and different factories, scopes across `await`, and concurrent writes
@@ -337,3 +357,5 @@ for nested scopes, identical values with different identities, interleaved
 asynchronous contexts, multiple categories, batch boundaries, and replay failures.
 `TextWriterLogger` tests cover the default and custom formatters, structured
 state and scopes, generated thread-local state, and concurrent writes.
+`TextWriterLoggerFactory` tests cover category caching, shared scopes, concurrent
+category writes, journal replay/forwarding, disposal, and writer ownership.
