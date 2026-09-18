@@ -255,6 +255,23 @@ internal sealed class LogJournalStore : IDisposable
         }
     }
 
+    private void EndScope(ScopeNode node)
+    {
+        lock (_gate)
+        {
+            if (ReferenceEquals(_currentScope.Value, node))
+            {
+                _currentScope.Value = node.Parent;
+                // Remove the requested scope if it is the curent scope.
+                if (_activeScopes.Count >= node.Depth
+                    && ReferenceEquals(_activeScopes[node.Depth - 1].Scope, node))
+                {
+                    CloseScopes(node.Depth - 1);
+                }
+            }
+        }
+    }
+
     private sealed record Entry(
         string CategoryName,
         LogLevel Level,
@@ -313,20 +330,6 @@ internal sealed class LogJournalStore : IDisposable
 
     private sealed class Scope(LogJournalStore owner, ScopeNode node) : IDisposable
     {
-        public void Dispose()
-        {
-            lock (owner._gate)
-            {
-                if (ReferenceEquals(owner._currentScope.Value, node))
-                {
-                    owner._currentScope.Value = node.Parent;
-                    if (owner._activeScopes.Count >= node.Depth
-                        && ReferenceEquals(owner._activeScopes[node.Depth - 1].Scope, node))
-                    {
-                        owner.CloseScopes(node.Depth - 1);
-                    }
-                }
-            }
-        }
+        public void Dispose() => owner.EndScope(node);
     }
 }
